@@ -7,7 +7,6 @@ from argo_nagios_ams_publisher.shared import Shared
 
 import argparse
 import daemon
-import daemon.pidlockfile
 import errno
 import multiprocessing
 import os
@@ -16,15 +15,29 @@ import pwd
 import signal
 import sys
 
+"""
+    try first to import el6 modulefile, if that fails try to import el7
+    modulefile
+"""
+try:
+    import daemon.pidlockfile as pidlockfile
+except ImportError:
+    import daemon.pidfile as pidlockfile
+
 pidfile = '/var/run/argo-nagios-ams-publisher/pid'
 logfile = '/var/log/argo-nagios-ams-publisher/ams-publisher.log'
 
 shared = None
+logger = None
 
 def get_userids(user):
     return pwd.getpwnam(user)[2], pwd.getpwnam(user)[3]
 
 def daemon_start(context_daemon, restart=False):
+    global shared
+    confopts = parse_config(shared.log)
+    shared = Shared(confopts=confopts)
+
     if context_daemon.pidfile.is_locked() and not \
             context_daemon.pidfile.i_am_locking():
         pid = context_daemon.pidfile.read_pid()
@@ -122,7 +135,7 @@ def daemonizer(args):
     pidfiledir(pidfile)
 
     context_daemon = daemon.DaemonContext()
-    context_daemon.pidfile = daemon.pidlockfile.PIDLockFile(pidfile, threaded=False)
+    context_daemon.pidfile = pidlockfile.PIDLockFile(pidfile, threaded=False)
 
     if args.daemon == 'start':
         daemon_start(context_daemon)
@@ -150,9 +163,8 @@ def main():
     lobj = Logger(sys.argv[0], logfile)
     logger = lobj.get()
 
-    confopts = parse_config(logger)
     global shared
-    shared = Shared(confopts=confopts)
+    shared = Shared()
 
     shared.add_log(logger)
     shared.add_event('term', multiprocessing.Event())
@@ -168,6 +180,8 @@ def main():
 
     if args.nofork:
         try:
+            confopts = parse_config()
+            shared = Shared(confopts=confopts)
             init_dirq_consume(shared.workers, daemonized=False)
         except KeyboardInterrupt:
             raise SystemExit(1)
