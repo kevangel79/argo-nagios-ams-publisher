@@ -8,10 +8,11 @@ from argo_nagios_ams_publisher import config
 from argo_nagios_ams_publisher import log
 
 import argparse
+import datetime
 import os
 import pwd
+import pytz
 import sys
-import datetime
 
 conf = '/etc/argo-nagios-ams-publisher/ams-publisher.conf'
 logfile = '/var/log/argo-nagios-ams-publisher/ams-publisher.log'
@@ -46,9 +47,10 @@ def main():
     logger = lobj.get()
     confopts = config.parse_config(logger)
     nagioshost = confopts['general']['host']
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
+    tz = pytz.timezone(confopts['general']['timezone'])
+    timestamp = datetime.datetime.now(tz).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    parser.add_argument('--queue', required=True, type=str)
+    parser.add_argument('--queue', required=True, nargs='+')
 
     # msg headers
     parser.add_argument('--service', required=True, type=str)
@@ -69,12 +71,13 @@ def main():
     seteuser(pwd.getpwnam(confopts['general']['runasuser']))
 
     try:
-        granularity = config.get_queue_granul(args.queue)
-        mq = DQS(path=args.queue, granularity=granularity)
+        for q in args.queue:
+            granularity = config.get_queue_granul(q)
+            mq = DQS(path=q, granularity=granularity)
 
-        msg = build_msg(args, timestamp, args.service, args.hostname, \
-                        args.testname, args.status, nagioshost)
-        mq.add_message(msg)
+            msg = build_msg(args, timestamp, args.service, args.hostname, \
+                            args.testname, args.status, nagioshost)
+            mq.add_message(msg)
 
     except MessageError as e:
         logger.error('Error constructing alarm - %s', repr(e))

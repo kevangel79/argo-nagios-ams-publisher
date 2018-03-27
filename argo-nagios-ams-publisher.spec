@@ -10,7 +10,7 @@
 %endif
 
 Name:           argo-nagios-ams-publisher
-Version:        0.2.1
+Version:        0.3.0
 Release:        1%{mydist}
 Summary:        Bridge from Nagios to the ARGO Messaging system
 
@@ -22,12 +22,13 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildArch:      noarch 
 BuildRequires:  python-devel
-Requires:       python-daemon
-Requires:       python-argparse
-Requires:       python-messaging
-Requires:       python-dirq
-Requires:       avro
 Requires:       argo-ams-library
+Requires:       avro
+Requires:       python-argparse
+Requires:       python-daemon
+Requires:       python-dirq
+Requires:       python-messaging
+Requires:       pytz
 
 %if 0%{?el7:1}
 Requires:       python2-psutil >= 4.3
@@ -65,27 +66,37 @@ install --directory --mode 755 $RPM_BUILD_ROOT/%{_localstatedir}/run/%{name}/
 %dir %{_localstatedir}/spool/%{name}/alarms/
 
 %post
+%if 0%{?el7:1}
+%systemd_post ams-publisher.service
+%else
 /sbin/chkconfig --add ams-publisher 
 if [ "$1" = 2 ]; then
   /sbin/service ams-publisher stop > /dev/null 2>&1
 fi
+%endif
 
 %clean
 rm -rf $RPM_BUILD_ROOT
 
 %preun
 if [ "$1" = 0 ]; then
+%if 0%{?el7:1}
+%systemd_preun ams-publisher.service
+%else
   /sbin/service ams-publisher stop > /dev/null 2>&1
   /sbin/chkconfig --del ams-publisher 
+%endif
 fi
 exit 0
 
 %postun
+%if 0%{?el7:1}
+%systemd_postun_with_restart ams-publisher.service
+%endif 
 if [ "$1" = 0 ]; then
   rm -rf %{_localstatedir}/run/%{name}/
 fi
 exit 0
-
 
 %pre
 if ! /usr/bin/id nagios &>/dev/null; then
@@ -98,6 +109,14 @@ if ! /usr/bin/getent group nagiocmd &>/dev/null; then
 fi
 
 %changelog
+* Tue Mar 27 2018 Daniel Vrcic <dvrcic@srce.hr> - 0.3.0-1%{?dist}
+- ARGO-1084 Connection settings per topic publisher
+- ARGO-1023 Send messages to prod and devel AMS instance in parallel
+- ARGO-1055 Last time stats report not updated
+- ARGO-1051 Ensure service stop called on system shutdown
+- ARGO-1004 UTC timestamp instead of localtime for dispatched results
+- ARGO-978 Add systemd init script
+- ARGO-806 AMS Publisher nagios testing method for upcoming probe
 * Wed Dec 20 2017 Daniel Vrcic <dvrcic@srce.hr> - 0.2.1-1%{?dist}
 - Centos 7 code fixes and spec update
 - ARGO-930 Service stop should not depend on successful config parse

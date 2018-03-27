@@ -2,14 +2,16 @@ import decimal
 import os
 import time
 
+from collections import deque
+from messaging.queue.dqs import DQS
+from multiprocessing import Process
+
 from argo_nagios_ams_publisher.purge import Purger
 from argo_nagios_ams_publisher.shared import Shared
-from collections import deque
-from datetime import datetime
-from messaging.queue.dqs import DQS
-from multiprocessing import Process, Event
+from argo_nagios_ams_publisher.stats import StatSig
 
-class ConsumerQueue(Process):
+
+class ConsumerQueue(StatSig, Process):
     """
        Class represents spawned worker process that will periodically check and
        consume local cache/directory queue. It will initialize associated
@@ -20,10 +22,9 @@ class ConsumerQueue(Process):
     def __init__(self, events, worker=None):
         Process.__init__(self)
         self.shared = Shared(worker=worker)
+        super(ConsumerQueue, self).__init__(worker=worker)
         self.name = worker
         self.events = events
-
-        self.nmsgs_consumed = 0
         self.sess_consumed = 0
 
         self.seenmsgs = set()
@@ -40,22 +41,8 @@ class ConsumerQueue(Process):
     def cleanup(self):
         self.unlock_dirq_msgs(self.seenmsgs)
 
-    def stats(self, reset=False):
-        def statmsg(hours):
-            self.shared.log.info('{0} {1}: consumed {2} msgs in {3:0.2f} hours'.format(self.__class__.__name__,
-                                                                        self.name,
-                                                                        self.nmsgs_consumed,
-                                                                        hours))
-        if reset:
-            statmsg(self.shared.general['statseveryhour'])
-            self.nmsgs_consumed = 0
-            self.prevstattime = int(datetime.now().strftime('%s'))
-        else:
-            sincelaststat = time.time() - self.prevstattime
-            statmsg(sincelaststat/3600)
-
     def run(self):
-        self.prevstattime = int(datetime.now().strftime('%s'))
+        self.prevstattime = int(time.time())
         termev = self.events['term-'+self.name]
         usr1ev = self.events['usr1-'+self.name]
         lck = self.events['lck-'+self.name]
@@ -64,7 +51,7 @@ class ConsumerQueue(Process):
         while True:
             try:
                 if termev.is_set():
-                    self.shared.log.warning('Process {0} received SIGTERM'.format(self.name))
+                    self.shared.log.info('Process {0} received SIGTERM'.format(self.name))
                     lck.acquire(True)
                     self.stats()
                     self.publisher.stats()
@@ -102,9 +89,10 @@ class ConsumerQueue(Process):
                         evgup.set()
                         raise SystemExit(0)
 
-                if int(datetime.now().strftime('%s')) - self.prevstattime >= self.shared.general['statseveryhour'] * 3600:
-                    self.stats(reset=True)
-                    self.publisher.stats(reset=True)
+                if int(time.time()) - self.prevstattime >= self.shared.general['statseveryhour'] * 3600:
+                    self.stat_reset()
+                    self.publisher.stat_reset()
+                    self.prevstattime = int(time.time())
 
                 time.sleep(decimal.Decimal(1) / decimal.Decimal(self.shared.queue['rate']))
 
@@ -112,10 +100,15 @@ class ConsumerQueue(Process):
                 self.cleanup()
                 raise SystemExit(0)
 
+    def _increm_intervalcounters(self, num):
+        for i in range(len(self.shared.statint[self.name]['consumed'])):
+            self.shared.statint[self.name]['consumed'][i] += num
+
     def consume_dirq_msgs(self, num=0):
         def _inmemq_append(elem):
             self.inmemq.append(elem)
-            self.nmsgs_consumed += 1
+            self.shared.stats['consumed'] += 1
+            self._increm_intervalcounters(1)
             self.sess_consumed += 1
             if num and self.sess_consumed == num:
                 self.sess_consumed = 0
