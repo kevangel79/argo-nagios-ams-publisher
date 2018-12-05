@@ -34,6 +34,66 @@ shared = None
 logger = None
 
 
+def query_stats(last_minutes):
+    def parse_result(query):
+        try:
+            w, r = query.split('+')
+
+            w = w.split(':')[1]
+            r = int(r.split(':')[1])
+
+        except (ValueError, KeyError):
+            return (w, 'error')
+
+        return (w, r)
+
+    maxcmdlength = 128
+    query_consumed, query_published = '', ''
+
+    for w in shared.workers:
+        query_consumed += 'w:{0}+g:consumed{1} '.format(w, last_minutes)
+
+    for w in shared.workers:
+        query_published += 'w:{0}+g:published{1} '.format(w, last_minutes)
+
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.setblocking(0)
+        sock.settimeout(15)
+
+        sock.connect(shared.general['statsocket'])
+        sock.send(query_published, maxcmdlength)
+        data = sock.recv(maxcmdlength)
+        for answer in data.split():
+            if answer.startswith('t:'):
+                continue
+            w, r = parse_result(answer)
+            shared.log.info('worker:{0} published:{1}'.format(w, r))
+        sock.close()
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.setblocking(0)
+        sock.settimeout(15)
+        sock.connect(shared.general['statsocket'])
+        sock.send(query_consumed, maxcmdlength)
+        data = sock.recv(maxcmdlength)
+        for answer in data.split(' '):
+            if answer.startswith('t:'):
+                continue
+            w, r = parse_result(answer)
+            shared.log.info('worker:{0} consumed:{1}'.format(w, r))
+        sock.close()
+
+    except socket.timeout as e:
+        shared.log.error('Socket response timeout after 15s')
+
+    except socket.error as e:
+        shared.log.error('Socket error: {0}'.format(str(e)))
+
+    finally:
+        sock.close()
+
+
 def setup_statssocket(path, uid, gid):
     global shared
 
@@ -49,14 +109,12 @@ def setup_statssocket(path, uid, gid):
 
     return sock
 
+
 def get_userids(user):
     return pwd.getpwnam(user)[2], pwd.getpwnam(user)[3]
 
-def daemon_start(context_daemon, restart=False):
-    global shared
-    confopts = parse_config(shared.log)
-    shared = Shared(confopts=confopts)
 
+def daemon_start(context_daemon, restart=False):
     if context_daemon.pidfile.is_locked() and not \
             context_daemon.pidfile.i_am_locking():
         pid = context_daemon.pidfile.read_pid()
@@ -92,7 +150,12 @@ def daemon_start(context_daemon, restart=False):
     with context_daemon:
         init_dirq_consume(shared.workers, daemonized=True, sockstat=sock)
 
+
 def daemon_stop(context_daemon, restart=False):
+    def on_terminate(proc):
+        if not restart:
+            shared.log.info('Stopping (%s)' % proc.pid)
+
     if context_daemon.pidfile.is_locked():
         pid = context_daemon.pidfile.read_pid()
 
@@ -104,10 +167,7 @@ def daemon_stop(context_daemon, restart=False):
                 shared.log.info('Not running - cleaning stale pidfile')
         else:
             process.terminate()
-            pgone, palive = psutil.wait_procs([process])
-
-            if not restart:
-                shared.log.info('Stopping (%s)' % pid)
+            pgone, palive = psutil.wait_procs([process], callback=on_terminate)
 
             for p in palive:
                 p.kill()
@@ -116,6 +176,7 @@ def daemon_stop(context_daemon, restart=False):
         shared.log.info('Not running')
 
     return 0
+
 
 def daemon_status(context_daemon):
     if context_daemon.pidfile.is_locked() and not \
@@ -135,17 +196,19 @@ def daemon_status(context_daemon):
         shared.log.info('Not running')
         return 3
 
+
 def pidfiledir(pidfile):
     try:
-        if not os.path.exists(os.path.dirname(pidfile)):
-            dirp = os.path.dirname(pidfile)
+        dirp = os.path.dirname(pidfile)
+        if not os.path.exists(dirp):
             os.makedirs(dirp)
-            uid, gid = get_userids(shared.general['runasuser'])
-            os.chown(dirp, uid, gid)
+        uid, gid = get_userids(shared.general['runasuser'])
+        os.chown(dirp, uid, gid)
     except (OSError, IOError) as e:
         if e.args[0] != errno.EEXIST:
             shared.log.error('%s %s' % (os.strerror(e.args[0]), e.args[1]))
             raise SystemExit(1)
+
 
 def daemonizer(args):
     """
@@ -173,6 +236,7 @@ def daemonizer(args):
         ret = daemon_status(context_daemon)
         raise SystemExit(ret)
 
+
 def main():
     """
        Function fetch arguments from command line, initialize logger,
@@ -197,18 +261,30 @@ def main():
                         help='do not fork into background')
     group.add_argument('-d', dest='daemon', type=str,
                        help='daemon arguments: start, stop, restart, status', metavar='')
+    group.add_argument('-q', dest='query', required=False, help='query for statistics for last n minutes',
+                       nargs='?', type=int, metavar='number of minutes', const=180)
     args = parser.parse_args()
 
     if args.nofork:
         try:
             confopts = parse_config()
             shared = Shared(confopts=confopts)
-            sock = setup_statssocket(shared.general['statsocket'])
+            uid, gid = get_userids(shared.general['runasuser'])
+            sock = setup_statssocket(shared.general['statsocket'], uid, gid)
             init_dirq_consume(shared.workers, daemonized=False, sockstat=sock)
         except KeyboardInterrupt:
             raise SystemExit(1)
 
     elif args.daemon:
+        confopts = parse_config(shared.log)
+        shared = Shared(confopts=confopts)
         daemonizer(args)
+
+    elif args.query:
+        confopts = parse_config(shared.log)
+        shared = Shared(confopts=confopts)
+        shared.log.info('Asked for statistics for last %s minutes' % int(args.query))
+        query_stats(args.query)
+
 
 main()
